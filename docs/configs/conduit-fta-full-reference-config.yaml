@@ -48,8 +48,23 @@ plugins:
     # path to rsync binary
     rsync-path: rsync
   scoutam:
-    # path to stager binary/utility
-    stager-path: samnfs
+    # base URL of the ScoutAM REST API (FTA hosts are not expected to have samcli or gRPC access to ScoutAM)
+    api-base-url: https://127.0.0.1:8080
+    # ScoutAM account used to authenticate to the REST API
+    api-username: admin
+    # password for api-username
+    api-password: password
+    # skip TLS certificate verification for the ScoutAM API (needed for self-signed certs)
+    api-insecure-skip-verify: true
+    # NATS server(s) that ScoutAM is configured to publish stage notifications to (see `samcli notify nats --stage`)
+    nats-servers:
+      - 127.0.0.1:4222
+    # prefix for the unique per-transfer NATS topic used to correlate stage completion notifications
+    nats-stage-topic-prefix: conduit.stage
+    # max time to wait on stage notifications for all requested files before failing setup
+    stage-timeout: 30m
+    # max number of files per batchstage API request; directories are split into multiple requests of this size
+    batch-size: 1000
   marchive:
     # The MarFS object list generation command
     objlist-path: mustang

@@ -32,3 +32,5 @@ nav:
       - LDAP: operations/ldap.md
       - Slurm Plugin: integrations/slurm-plugin.md
       - MCP Server: operations/conduit-mcp-server.md
+      - ScoutAM Plugin Testing: operations/scoutam-plugin-testing.md
+      - ScoutAM Test Lab Setup: operations/scoutam-test-lab-setup.md

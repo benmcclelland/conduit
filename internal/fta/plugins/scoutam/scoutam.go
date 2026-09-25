@@ -3,6 +3,8 @@
 package scoutam
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	proto "github.com/lanl/conduit/api"
 	"github.com/lanl/conduit/internal/fta/plugin"
@@ -11,14 +13,34 @@ import (
 )
 
 const (
-	ScoutAMPluginKey     = "scoutam"
-	DefaultScoutAMStager = "samnfs"
+	ScoutAMPluginKey                = "scoutam"
+	DefaultScoutAMAPIBaseURL        = "https://127.0.0.1:8080"
+	DefaultScoutAMNatsStageTopicPre = "conduit.stage"
+	DefaultScoutAMStageTimeout      = 30 * time.Minute
+	DefaultScoutAMBatchSize         = 1000
 )
 
 var _ plugin.ConduitFTAPlugin = (*ScoutAMPlugin)(nil)
 
 type ViperScoutAMPluginConfig struct {
-	StagerPath string `mapstructure:"stager-path" yaml:"stager-path"`
+	// APIBaseURL is the base URL of the ScoutAM REST API (FTA hosts are not expected to have samcli/scoutfs tooling installed)
+	APIBaseURL string `mapstructure:"api-base-url" yaml:"api-base-url"`
+	// APIUsername is the ScoutAM account used to authenticate to the REST API
+	APIUsername string `mapstructure:"api-username" yaml:"api-username"`
+	// APIPassword is the password for APIUsername
+	APIPassword string `mapstructure:"api-password" yaml:"api-password"`
+	// APIInsecureSkipVerify skips TLS certificate verification for the ScoutAM API
+	APIInsecureSkipVerify bool `mapstructure:"api-insecure-skip-verify" yaml:"api-insecure-skip-verify"`
+	// NatsServers is the list of NATS server addresses ScoutAM is configured to publish stage notifications to (see `samcli notify nats --stage`)
+	NatsServers []string `mapstructure:"nats-servers" yaml:"nats-servers"`
+	// NatsStageTopicPrefix prefixes the unique per-transfer NATS topic requested for stage completion notifications
+	NatsStageTopicPrefix string `mapstructure:"nats-stage-topic-prefix" yaml:"nats-stage-topic-prefix"`
+	// StageTimeout is the max amount of time to wait for all requested files to report as staged before failing setup
+	StageTimeout time.Duration `mapstructure:"stage-timeout" yaml:"stage-timeout"`
+	// BatchSize is the max number of files sent in a single batchstage API request. Directories are
+	// split into multiple requests of this size so ScoutAM can start staging early files while later
+	// ones are still being enumerated, and so no single request body gets too large.
+	BatchSize int `mapstructure:"batch-size" yaml:"batch-size"`
 }
 
 type ScoutAMPlugin struct {
@@ -66,6 +88,9 @@ func (p *ScoutAMPlugin) GetDefaultConfig() any {
 
 func DefaultScoutAMPluginConfig() ViperScoutAMPluginConfig {
 	return ViperScoutAMPluginConfig{
-		StagerPath: DefaultScoutAMStager,
+		APIBaseURL:           DefaultScoutAMAPIBaseURL,
+		NatsStageTopicPrefix: DefaultScoutAMNatsStageTopicPre,
+		StageTimeout:         DefaultScoutAMStageTimeout,
+		BatchSize:            DefaultScoutAMBatchSize,
 	}
 }
