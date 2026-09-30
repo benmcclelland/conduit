@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -67,16 +68,16 @@ func (c *apiClient) filesystems(ctx context.Context, token string) ([]filesystem
 	return respBody.FSIDs, nil
 }
 
-// resolveFSID finds the fsid for the filesystem mounted at (or above) path.
-func (c *apiClient) resolveFSID(ctx context.Context, token string, path string) (string, error) {
+// resolveFilesystem finds the ScoutAM filesystem mounted at (or above) path.
+func (c *apiClient) resolveFilesystem(ctx context.Context, token string, path string) (filesystemInfo, error) {
 	fsids, err := c.filesystems(ctx, token)
 	if err != nil {
-		return "", fmt.Errorf("failed to list ScoutAM filesystems: %v", err)
+		return filesystemInfo{}, fmt.Errorf("failed to list ScoutAM filesystems: %v", err)
 	}
 
 	var bestMatch filesystemInfo
 	for _, fsid := range fsids {
-		if !strings.HasPrefix(path, fsid.Mount) {
+		if !pathIsWithin(fsid.Mount, path) {
 			continue
 		}
 		if len(fsid.Mount) > len(bestMatch.Mount) {
@@ -84,9 +85,25 @@ func (c *apiClient) resolveFSID(ctx context.Context, token string, path string) 
 		}
 	}
 	if bestMatch.FSID == "" {
-		return "", fmt.Errorf("no ScoutAM filesystem mount found for path %v", path)
+		return filesystemInfo{}, fmt.Errorf("no ScoutAM filesystem mount found for path %v", path)
 	}
-	return bestMatch.FSID, nil
+	return bestMatch, nil
+}
+
+// serverAPIPath translates an FTA-local path into the absolute server-side path ScoutAM accepts.
+// apiRoot is the server-side ScoutFS directory represented by ftaRoot on the FTA host.
+func serverAPIPath(ftaPath string, ftaRoot string, apiRoot string) (string, error) {
+	localRelative, err := filepath.Rel(ftaRoot, ftaPath)
+	if err != nil || !pathIsWithin(ftaRoot, ftaPath) {
+		return "", fmt.Errorf("FTA path %q is outside configured FTA root %q", ftaPath, ftaRoot)
+	}
+
+	return filepath.Join(apiRoot, localRelative), nil
+}
+
+func pathIsWithin(root string, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // batchStage requests ScoutAM stage the given paths (online or offline; ScoutAM notifies for both),

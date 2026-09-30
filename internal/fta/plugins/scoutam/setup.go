@@ -88,7 +88,18 @@ func (p *ScoutAMPlugin) Setup(transferID uuid.UUID, pathInfo *plugin.PluginPathI
 		}, nil
 	}
 
-	fsid, err := client.resolveFSID(ctx, token, pathInfo.ResolvedFTAPath)
+	apiRoot, err := getAPIRoot(pathInfo.FSC)
+	if err != nil {
+		return &proto.FTAPluginErrors{
+			Errors: []*proto.FTAPathError{{
+				LeasePath:  pathInfo.OriginalUserPath,
+				PErr:       proto.Error_ERROR_INVALID_CONDUIT_CONFIG,
+				ErrMessage: err.Error(),
+			}},
+		}, nil
+	}
+
+	filesystem, err := client.resolveFilesystem(ctx, token, apiRoot)
 	if err != nil {
 		return &proto.FTAPluginErrors{
 			Errors: []*proto.FTAPathError{
@@ -160,7 +171,7 @@ func (p *ScoutAMPlugin) Setup(transferID uuid.UUID, pathInfo *plugin.PluginPathI
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := client.batchStage(ctx, token, batch, fsid, topic); err != nil {
+		if err := client.batchStage(ctx, token, batch, filesystem.FSID, topic); err != nil {
 			return err
 		}
 		total += len(batch)
@@ -174,7 +185,11 @@ func (p *ScoutAMPlugin) Setup(transferID uuid.UUID, pathInfo *plugin.PluginPathI
 	// The scoutfs mount is assumed to be directly reachable from the FTA host, so we can walk it
 	// locally to enumerate the candidate files without any ScoutAM API calls.
 	err = walkFilePaths(pathInfo.ResolvedFTAPath, ds, func(p string) error {
-		batch = append(batch, p)
+		apiPath, err := serverAPIPath(p, pathInfo.FSC.FTARootFSPathSub, apiRoot)
+		if err != nil {
+			return err
+		}
+		batch = append(batch, apiPath)
 		if len(batch) >= batchSize {
 			return submitBatch()
 		}
@@ -237,6 +252,23 @@ func (p *ScoutAMPlugin) Setup(transferID uuid.UUID, pathInfo *plugin.PluginPathI
 	})
 
 	return &proto.FTAPluginErrors{}, pathInfo
+}
+
+func getAPIRoot(fsc *plugin.FileSystemConfig) (string, error) {
+	apiRoot, ok := fsc.CustomPluginFSConfig[CustomPluginConfigAPIRootKey]
+	if !ok {
+		// Preserve the original same-mount-path behavior for existing configurations.
+		return fsc.FTARootFSPathSub, nil
+	}
+
+	root, ok := apiRoot.(string)
+	if !ok || root == "" {
+		return "", fmt.Errorf("expected non-empty string for %q, got %T", CustomPluginConfigAPIRootKey, apiRoot)
+	}
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("expected absolute path for %q, got %q", CustomPluginConfigAPIRootKey, root)
+	}
+	return filepath.Clean(root), nil
 }
 
 // walkFilePaths calls fn once with path itself if it's a regular file, or once for every regular

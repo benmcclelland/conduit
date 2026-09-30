@@ -22,6 +22,13 @@ The plugin assumes the ScoutFS mount itself *is* directly reachable from the FTA
 walk directories locally with `filepath.WalkDir` to enumerate files), it just can't assume `samcli`
 or ScoutAM's gRPC port are reachable/authorized.
 
+The FTA's NFS mount need not use the same path as ScoutAM. Set the archive filesystem's
+`custom-plugin-config.scoutam-api-root` to the server-side ScoutFS directory represented by its
+`fta-root-fs-path`. The plugin then submits server-side absolute paths to ScoutAM. For
+example, if `/client/nfs/scoutfs` mounts `server:/server/scoutfs/dir`, configure
+`fta-root-fs-path: /client/nfs/scoutfs` and `scoutam-api-root: /server/scoutfs/dir`; a local path
+`/client/nfs/scoutfs/a/b` is submitted as `/server/scoutfs/dir/a/b`.
+
 ## Stage notifications
 
 ScoutAM can publish stage-completion events to a message bus (NATS or Kafka; see `samcli notify

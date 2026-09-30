@@ -14,6 +14,7 @@ import (
 
 const (
 	ScoutAMPluginKey                = "scoutam"
+	CustomPluginConfigAPIRootKey    = "scoutam-api-root"
 	DefaultScoutAMAPIBaseURL        = "https://127.0.0.1:8080"
 	DefaultScoutAMNatsStageTopicPre = "conduit.stage"
 	DefaultScoutAMStageTimeout      = 30 * time.Minute

@@ -34,6 +34,9 @@ filesystems:
     custom-plugin-config:
       # the posix plugin allows for moving sources to a trash location instead of removing during teardown
       posix-src-trash: ""
+      # when setup-src is scoutam, the server-side ScoutFS directory represented by fta-root-fs-path;
+      # ScoutAM stage requests use this server-side path (for example, /server/scoutfs/dir)
+      # scoutam-api-root: /server/scoutfs
 plugins:
   pftool:
     # path to pfcp binary
