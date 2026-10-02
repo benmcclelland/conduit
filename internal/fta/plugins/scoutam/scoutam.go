@@ -19,6 +19,7 @@ const (
 	DefaultScoutAMNatsStageTopicPre = "conduit.stage"
 	DefaultScoutAMStageTimeout      = 30 * time.Minute
 	DefaultScoutAMBatchSize         = 1000
+	DefaultScoutAMRsyncPath         = "rsync"
 )
 
 var _ plugin.ConduitFTAPlugin = (*ScoutAMPlugin)(nil)
@@ -42,6 +43,8 @@ type ViperScoutAMPluginConfig struct {
 	// split into multiple requests of this size so ScoutAM can start staging early files while later
 	// ones are still being enumerated, and so no single request body gets too large.
 	BatchSize int `mapstructure:"batch-size" yaml:"batch-size"`
+	// RsyncPath is the rsync binary used by Transfer to copy files as soon as they're staged
+	RsyncPath string `mapstructure:"rsync-path" yaml:"rsync-path"`
 }
 
 type ScoutAMPlugin struct {
@@ -55,6 +58,7 @@ func (p *ScoutAMPlugin) Initialize(transferID uuid.UUID, log *logger.ConduitLogg
 
 	return []plugin.PluginCapability{
 		plugin.SETUP,
+		plugin.TRANSFER,
 	}
 }
 
@@ -74,11 +78,6 @@ func (p *ScoutAMPlugin) ValidateDestination(sourceBases []string, userDestinatio
 }
 
 // no op
-func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.PluginData, destInfo proto.DestInfo, action string, options map[string]*anypb.Any, updateTransferProgress plugin.UpdateTransferProgress, updateAction plugin.UpdateAction) *proto.FTAPluginErrors {
-	return &proto.FTAPluginErrors{}
-}
-
-// no op
 func (p *ScoutAMPlugin) Teardown(transferID uuid.UUID, transferDetails *proto.TransferDetails, pathInfo *plugin.PluginPathInfo, pathType proto.LeaseType, action string, options map[string]*anypb.Any, baseDest bool, updateTransferProgress plugin.UpdateTransferProgress) (_ *proto.FTAPluginErrors) {
 	return &proto.FTAPluginErrors{}
 }
@@ -93,5 +92,6 @@ func DefaultScoutAMPluginConfig() ViperScoutAMPluginConfig {
 		NatsStageTopicPrefix: DefaultScoutAMNatsStageTopicPre,
 		StageTimeout:         DefaultScoutAMStageTimeout,
 		BatchSize:            DefaultScoutAMBatchSize,
+		RsyncPath:            DefaultScoutAMRsyncPath,
 	}
 }

@@ -342,9 +342,9 @@ filesystems:
     fta-root-fs-path: /mnt/scoutfs
     plugin-stages:
       validation: posix
-      setup-src: scoutam # <-- the plugin under test
+      setup-src: posix # scoutam stages in the transfer stage instead (see below)
       setup-dst: posix
-      transfer-src: [rsync]
+      transfer-src: [scoutam, rsync] # <-- the plugin under test
       transfer-dst: [rsync]
       teardown-src: posix
       teardown-dst: posix
@@ -357,7 +357,7 @@ filesystems:
       setup-src: posix
       setup-dst: posix
       transfer-src: [rsync]
-      transfer-dst: [rsync]
+      transfer-dst: [scoutam, rsync] # lets scoutam copy archive sources here
       teardown-src: posix
       teardown-dst: posix
 fta:
@@ -374,7 +374,25 @@ plugins:
     nats-servers: ["192.168.121.220:4222"]
     nats-stage-topic-prefix: conduit.stage
     stage-timeout: 30m
+    batch-size: 3 # small on purpose so a test directory spans several stage requests/rsync runs
+    rsync-path: rsync
 ```
+
+This runs the `scoutam` plugin in **pipeline mode**: during the transfer stage it requests staging
+in batches while walking the sources and copies each file with rsync as soon as ScoutAM reports it
+staged. Three settings make this work:
+
+- `setup-src: posix` on `archive`, so setup doesn't stage everything up front.
+- `scoutam` first in `archive`'s `transfer-src`.
+- `scoutam` in the destination filesystem's `transfer-dst`. conduit only uses a transfer plugin
+  that both the source and destination filesystems list.
+
+In this mode `stage-timeout` is how long to go without any stage notification while files are
+still pending, not a limit on the whole transfer.
+
+To stage everything before copying instead (the original mode), set `setup-src: scoutam` and
+`transfer-src: [rsync]` on `archive` and drop `scoutam` from `default`'s `transfer-dst`. See
+[Staging modes](scoutam-plugin-testing.md#staging-modes) for a comparison.
 
 `/etc/systemd/system/conduit-runner.service` - **must run as root**, not the `vagrant` user:
 `conduit-runner` drops privileges to the requesting user before spawning `conduit-fta`
@@ -405,6 +423,41 @@ conduit cp -d --user vagrant \
 determines which UID/GID `conduit-fta` runs as on `conduit-fta`. Expect the transfer to reach
 `TRANSFER_FINALIZED`, and `md5sum` on both ends to match.
 
+### Pipelined directory transfer
+
+Create a directory of archived, released (offline) files on `conduit-scoutam`:
+
+```sh
+d=/mnt/scoutfs/conduit-test/pipeline
+sudo mkdir -p $d/sub $d/empty
+for i in 1 2 3 4 5; do sudo dd if=/dev/urandom of=$d/f$i.bin bs=1M count=5; done
+for i in 6 7 8; do sudo dd if=/dev/urandom of=$d/sub/f$i.bin bs=1M count=5; done
+sudo ln -s f1.bin $d/link-to-f1 && sudo chown -R vagrant:vagrant $d
+(cd $d && md5sum $(find . -type f | sort) > /tmp/pipeline.md5)
+for f in $(find $d -type f); do sudo samcli file archive -i -W $f; sudo samcli file release $f; done
+for f in $(find $d -type f); do sudo scoutfs stat -s offline_blocks $f; done # non-zero = offline
+```
+
+Take checksums **before** releasing: reading a released file (for example with `md5sum`) stages it
+back online.
+
+Then copy it recursively from `conduit-master`:
+
+```sh
+conduit cp -r --user vagrant \
+  --ca /etc/conduit/keys/conduit-external-ca.pem \
+  --cert /etc/conduit/keys/conduit-admin-cert.pem \
+  --key /etc/conduit/keys/conduit-admin-key.pem \
+  -i 192.168.121.144 -p 23456 \
+  /mnt/scoutfs/conduit-test/pipeline /scratch/pipeline-copy
+```
+
+Watching `/scratch/pipeline-copy` on `conduit-fta` during the transfer shows files arriving while
+others are still staging. In the validation run (8 x 5MB offline files), the first file landed
+~18s after submission and the transfer was `Finalized` ~7s later. Checksums matched
+`/tmp/pipeline.md5`, and the symlink, empty directory, permissions, ownership and mtimes matched
+the source.
+
 ## Troubleshooting notes
 
 - **`no route to host` from conduit-fta to the ScoutAM API/NATS**: `firewalld` on
@@ -415,3 +468,11 @@ determines which UID/GID `conduit-fta` runs as on `conduit-fta`. Expect the tran
   wrong on a binary copied in via `scp`/`mv` from `/tmp` - `sudo restorecon -v <path>`.
 - **`no user provided in request`** from `conduit cp`: pass `--user <name>` when authenticating
   with the admin cert.
+- **`CONDUIT_FTA_SOCKET environment variable is not set`** during validation: `conduit-fta` is
+  newer than `conduit-runner`. Build and deploy `conduit-fta`, `conduit-runner`, `conduit-server`
+  and the `conduit` CLI from the same commit.
+- **Pipeline transfer stays at 0B and eventually times out** although ScoutAM staged the files
+  (`journalctl -u scoutam` shows `done packet`): the stage notifications aren't matching requested
+  files. The `conduit-fta` stderr in the `conduit-runner` journal shows `Ignoring ScoutAM stage
+  notification for unrequested file ...` with the name ScoutAM reported. Names are expected to be
+  relative to the ScoutFS mount (for example `conduit-test/pipeline/f1.bin`).

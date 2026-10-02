@@ -51,9 +51,34 @@ Important behavior confirmed against a real ScoutAM instance:
 - Stage completion notifications for files that actually need to come off tape/S3 can take from a
   few seconds up to ~30s or more depending on backend media, well within the default
   `stage-timeout`.
-- `BatchStageRequest.path` values in notifications for a batch submitted with `topic` and `path`
-  come back with the full submitted path (not necessarily normalized relative to the mount), so
-  they're only used for error-message context here.
+- The `Filename` in a stage notification is the path **relative to the ScoutFS mount** (e.g.
+  `conduit-test/pipeline/f1.bin` for `/mnt/scoutfs/conduit-test/pipeline/f1.bin`), not the
+  absolute path submitted in the `batchstage` request. `Setup()` only uses it for error-message
+  context; `Transfer()` keys pending files by their mount-relative path so each notification can be
+  matched to the file to copy (absolute names are accepted too).
+
+## Staging modes
+
+The plugin can stage in one of two places, chosen by the archive filesystem's `plugin-stages`:
+
+| Mode | Config | Behavior |
+|---|---|---|
+| Stage then copy | `setup-src: scoutam`, `transfer-src/dst: [rsync]` (or pftool) | `Setup()` stages every file of every source and waits for all notifications; only then does the transfer plugin start copying. `stage-timeout` bounds the whole wait. |
+| Stage and copy in a pipeline | `setup-src: posix`, `transfer-src: [scoutam]`, and `scoutam` in the **destination** filesystem's `transfer-dst` | `Transfer()` walks the sources, submits `batchstage` requests, and copies each file with rsync as soon as its notification arrives (up to `batch-size` files per rsync run, one run at a time). `stage-timeout` is how long to go with no notification while files are still pending. |
+
+In pipeline mode:
+
+- Directories, symlinks and special files don't need staging and are copied straight away.
+  Directory entries (and finally the source root itself) are copied last, so later file copies
+  don't change their mtimes.
+- Sources on filesystems that don't list `scoutam` in `transfer-src` are copied without staging, so
+  mixed archive + non-archive sources still work.
+- Destination layout follows posix validation: if the destination is an existing directory, each
+  source lands inside it as `<dest>/<basename>`; otherwise the destination becomes the copy.
+- rsync runs with `--links --perms --times --group --owner --specials`, the same options the rsync
+  plugin uses. Directory sources are copied with `--files-from`.
+- A stage error or a failed rsync batch doesn't stop the other files; all failures are reported
+  together at the end, and the transfer fails.
 
 ## Test environment
 
@@ -123,7 +148,7 @@ See the `scoutam` section of
 [docs/configs/conduit-fta-full-reference-config.yaml](../configs/conduit-fta-full-reference-config.yaml)
 for the full set of `plugins.scoutam` options (`api-base-url`, `api-username`, `api-password`,
 `api-insecure-skip-verify`, `nats-servers`, `nats-stage-topic-prefix`, `stage-timeout`,
-`batch-size`).
+`batch-size`, `rsync-path`).
 
 ## Production considerations
 

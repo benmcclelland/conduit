@@ -34,7 +34,7 @@ filesystems:
     custom-plugin-config:
       # the posix plugin allows for moving sources to a trash location instead of removing during teardown
       posix-src-trash: ""
-      # when setup-src is scoutam, the server-side ScoutFS directory represented by fta-root-fs-path;
+      # when setup-src or transfer-src uses scoutam, the server-side ScoutFS directory represented by fta-root-fs-path;
       # ScoutAM stage requests use this server-side path (for example, /server/scoutfs/dir)
       # scoutam-api-root: /server/scoutfs
 plugins:
@@ -64,10 +64,13 @@ plugins:
       - 127.0.0.1:4222
     # prefix for the unique per-transfer NATS topic used to correlate stage completion notifications
     nats-stage-topic-prefix: conduit.stage
-    # max time to wait on stage notifications for all requested files before failing setup
+    # setup-src: scoutam - max time to wait on stage notifications for all requested files before failing setup
+    # transfer-src: scoutam - max time to go without any stage notification while files are still pending
     stage-timeout: 30m
-    # max number of files per batchstage API request; directories are split into multiple requests of this size
+    # max number of files per batchstage API request (and per rsync invocation in transfer mode); directories are split into multiple requests of this size
     batch-size: 1000
+    # rsync binary used when scoutam is the transfer plugin (stages and copies each file as soon as it's online)
+    rsync-path: rsync
   marchive:
     # The MarFS object list generation command
     objlist-path: mustang
