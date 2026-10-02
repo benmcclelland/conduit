@@ -148,7 +148,29 @@ See the `scoutam` section of
 [docs/configs/conduit-fta-full-reference-config.yaml](../configs/conduit-fta-full-reference-config.yaml)
 for the full set of `plugins.scoutam` options (`api-base-url`, `api-username`, `api-password`,
 `api-insecure-skip-verify`, `nats-servers`, `nats-stage-topic-prefix`, `stage-timeout`,
-`batch-size`, `rsync-path`).
+`batch-size`, `rsync-path`, `cancel-stage-on-timeout`).
+
+## Cancelling stages on timeout
+
+With `cancel-stage-on-timeout: true`, when `stage-timeout` fires (in either staging mode) the plugin
+asks ScoutAM to drop every stage request it made that hasn't reported back yet, then fails as
+before. The timeout error says how many requests were cancelled or couldn't be.
+
+- It uses `PUT /v1/scheduler/stagecancelfiles` with `{"filenames": [<server-side paths>], "fsid"}`.
+  `/v1/request/cancelbatchstage` is deprecated and always returns an error.
+- The `/v1/scheduler/*` endpoints need an **operator** (or higher) ScoutAM role; `batchstage` works
+  for any account.
+- ScoutAM removes the file from waiting and pending stage jobs and clears its stage flags. A file
+  whose stage job is already running can't be cancelled; it finishes staging and its notification
+  is ignored.
+- No notification is published for a cancelled file.
+- ScoutAM stops a batch cancel at the first file it can't resolve (for example one deleted since
+  the request), so a failed batch is retried one file at a time.
+- Cancellation is per file, not per request: another transfer or user waiting on the same file
+  loses its stage too. That's why this is off by default.
+- It only covers the plugin's own timeout. A transfer aborted from outside (`conduit abort`, an
+  error elsewhere, lease expiry) ends the `conduit-fta` process without giving the plugin a chance
+  to cancel.
 
 ## Production considerations
 

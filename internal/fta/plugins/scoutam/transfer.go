@@ -128,7 +128,12 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 	for {
 		batch, done, err := pl.next(batchSize, cfg.StageTimeout)
 		if err != nil {
-			return transferError(proto.Error_ERROR_FTA_PLUGIN_FAILED, err.Error())
+			msg := err.Error()
+			if cfg.CancelStageOnTimeout && st != nil {
+				cancel() // stop the walker submitting more stage requests
+				msg += p.cancelPendingStages(cfg, st.client, pl.pendingStages(), batchSize)
+			}
+			return transferError(proto.Error_ERROR_FTA_PLUGIN_FAILED, msg)
 		}
 		if done {
 			break
@@ -296,7 +301,7 @@ func walkSource(ctx context.Context, gi int, g copyGroup, st *stager, pl *stageP
 		if err != nil {
 			return err
 		}
-		if err := pl.addPending(fsInfo.Mount, apiPath, item); err != nil {
+		if err := pl.addPending(fsInfo.Mount, fsInfo.FSID, apiPath, item); err != nil {
 			return err
 		}
 		batch = append(batch, apiPath)
@@ -371,6 +376,41 @@ func runRsync(ctx context.Context, rsyncPath string, args []string, stdin io.Rea
 		return fmt.Errorf("%v failed: %v: %s", cmd.Args, err, output)
 	}
 	return nil
+}
+
+// cancelPendingStages asks ScoutAM to drop stage requests that are still pending after a timeout
+// and returns a note to append to the timeout error.
+func (p *ScoutAMPlugin) cancelPendingStages(cfg ViperScoutAMPluginConfig, client *apiClient, pending map[string][]string, batchSize int) string {
+	var total int
+	for _, paths := range pending {
+		total += len(paths)
+	}
+	if total == 0 {
+		return ""
+	}
+
+	ctx := context.Background()
+	// the original token may have expired while waiting on stage-timeout
+	token, err := client.login(ctx, cfg.APIUsername, cfg.APIPassword)
+	if err != nil {
+		return fmt.Sprintf("; failed to cancel %d pending stage request(s): %v", total, err)
+	}
+
+	var failed int
+	var firstErr error
+	for fsid, paths := range pending {
+		f, err := client.cancelStages(ctx, token, paths, fsid, batchSize)
+		failed += f
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if failed > 0 {
+		p.log.Errorf("failed to cancel %d of %d pending ScoutAM stage request(s): %v", failed, total, firstErr)
+		return fmt.Sprintf("; failed to cancel %d of %d pending stage request(s): %v", failed, total, firstErr)
+	}
+	p.log.Infof("cancelled %d pending ScoutAM stage request(s)", total)
+	return fmt.Sprintf("; cancelled %d pending stage request(s)", total)
 }
 
 func summarizeErrors(errs []string) string {

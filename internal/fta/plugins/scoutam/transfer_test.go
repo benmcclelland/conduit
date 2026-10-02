@@ -4,9 +4,14 @@ package scoutam
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -92,7 +97,7 @@ func TestStagePipelineWaitsForWalk(t *testing.T) {
 	pl := newStagePipeline()
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		_ = pl.addPending("/fs", "/fs/a", copyItem{rel: "a"})
+		_ = pl.addPending("/fs", "1", "/fs/a", copyItem{rel: "a"})
 		pl.onStageEvent(stageEvent{Filename: "a"})
 		pl.finishWalk(nil)
 	}()
@@ -101,14 +106,80 @@ func TestStagePipelineWaitsForWalk(t *testing.T) {
 }
 
 func TestStagePipelineRejectsOutsideMount(t *testing.T) {
-	if err := newStagePipeline().addPending("/fs", "/other/a", copyItem{}); err == nil {
+	if err := newStagePipeline().addPending("/fs", "1", "/other/a", copyItem{}); err == nil {
 		t.Fatal("addPending() error = nil, want error")
+	}
+}
+
+func TestStagePipelinePendingStages(t *testing.T) {
+	pl := newStagePipeline()
+	mustAddPending(t, pl, "/fs/a", "a")
+	mustAddPending(t, pl, "/fs/b", "b")
+	if err := pl.addPending("/fs2", "2", "/fs2/c", copyItem{rel: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	pl.onStageEvent(stageEvent{Filename: "a"})
+
+	got := pl.pendingStages()
+	want := map[string][]string{"1": {"/fs/b"}, "2": {"/fs2/c"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pendingStages() = %v, want %v", got, want)
+	}
+}
+
+func TestCancelStages(t *testing.T) {
+	var requests [][]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Filenames []string `json:"filenames"`
+			FSID      string   `json:"fsid"`
+		}
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/scheduler/stagecancelfiles" || r.Header.Get("Authorization") != "Bearer tok" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.FSID != "7" {
+			t.Errorf("bad body %+v: %v", body, err)
+		}
+		requests = append(requests, body.Filenames)
+		// ScoutAM fails the whole batch on the first bad file
+		if slices.Contains(body.Filenames, "/fs/gone") {
+			http.Error(w, "lstat /fs/gone: no such file", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+
+	client := newAPIClient(srv.URL, false)
+	failed, err := client.cancelStages(context.Background(), "tok", []string{"/fs/a", "/fs/gone", "/fs/b", "/fs/c"}, "7", 3)
+	if failed != 1 || err == nil {
+		t.Errorf("cancelStages() = %d, %v, want 1 failure", failed, err)
+	}
+	want := [][]string{
+		{"/fs/a", "/fs/gone", "/fs/b"},
+		{"/fs/a"}, {"/fs/gone"}, {"/fs/b"},
+		{"/fs/c"},
+	}
+	if !reflect.DeepEqual(requests, want) {
+		t.Errorf("requests = %v, want %v", requests, want)
+	}
+}
+
+func TestStageEventKey(t *testing.T) {
+	mounts := []string{"/mnt/scoutfs"}
+	for in, want := range map[string]string{
+		"dir/f":              "dir/f",
+		"/mnt/scoutfs/dir/f": "dir/f",
+		"/other/dir/f":       "/other/dir/f",
+		"dir//f":             "dir/f",
+	} {
+		if got := stageEventKey(in, mounts); got != want {
+			t.Errorf("stageEventKey(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
 func mustAddPending(t *testing.T, pl *stagePipeline, apiPath string, rel string) {
 	t.Helper()
-	if err := pl.addPending("/fs", apiPath, copyItem{rel: rel}); err != nil {
+	if err := pl.addPending("/fs", "1", apiPath, copyItem{rel: rel}); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -166,6 +168,7 @@ func (p *ScoutAMPlugin) Setup(transferID uuid.UUID, pathInfo *plugin.PluginPathI
 	}
 
 	var total int
+	pending := make(map[string]string) // mount-relative key -> server-side path, for cancelling on timeout
 	batch := make([]string, 0, batchSize)
 	submitBatch := func() error {
 		if len(batch) == 0 {
@@ -189,6 +192,11 @@ func (p *ScoutAMPlugin) Setup(transferID uuid.UUID, pathInfo *plugin.PluginPathI
 		if err != nil {
 			return err
 		}
+		key, err := mountRelative(filesystem.Mount, apiPath)
+		if err != nil {
+			return err
+		}
+		pending[key] = apiPath
 		batch = append(batch, apiPath)
 		if len(batch) >= batchSize {
 			return submitBatch()
@@ -220,16 +228,21 @@ func (p *ScoutAMPlugin) Setup(transferID uuid.UUID, pathInfo *plugin.PluginPathI
 	for remaining := total; remaining > 0; remaining-- {
 		evt, ok := queue.pop(timeout)
 		if !ok {
+			msg := fmt.Sprintf("timed out after %v waiting on stage notifications for %v (%d of %d files still pending)", scoutAMConfig.StageTimeout, pathInfo.OriginalUserPath, remaining, total)
+			if scoutAMConfig.CancelStageOnTimeout {
+				msg += p.cancelPendingStages(scoutAMConfig, client, map[string][]string{filesystem.FSID: slices.Collect(maps.Values(pending))}, batchSize)
+			}
 			return &proto.FTAPluginErrors{
 				Errors: []*proto.FTAPathError{
 					{
 						LeasePath:  pathInfo.OriginalUserPath,
 						PErr:       proto.Error_ERROR_FTA_PLUGIN_FAILED,
-						ErrMessage: fmt.Sprintf("timed out after %v waiting on stage notifications for %v (%d of %d files still pending)", scoutAMConfig.StageTimeout, pathInfo.OriginalUserPath, remaining, total),
+						ErrMessage: msg,
 					},
 				},
 			}, nil
 		}
+		delete(pending, stageEventKey(evt.Filename, []string{filesystem.Mount}))
 		if evt.Error != "" {
 			stageErrs = append(stageErrs, fmt.Sprintf("%s: %s", evt.Filename, evt.Error))
 		}

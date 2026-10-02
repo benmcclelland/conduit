@@ -4,6 +4,7 @@ package scoutam
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -116,6 +117,41 @@ func (c *apiClient) batchStage(ctx context.Context, token string, paths []string
 	}{Path: paths, FSID: fsid, Topic: topic}
 
 	return c.do(ctx, http.MethodPut, "/v1/request/batchstage", token, reqBody, nil)
+}
+
+// cancelStage drops pending stage requests for paths. Files whose stage job is already running
+// can't be cancelled and will still come online.
+func (c *apiClient) cancelStage(ctx context.Context, token string, paths []string, fsid string) error {
+	reqBody := struct {
+		Filenames []string `json:"filenames"`
+		FSID      string   `json:"fsid"`
+	}{Filenames: paths, FSID: fsid}
+
+	return c.do(ctx, http.MethodPut, "/v1/scheduler/stagecancelfiles", token, reqBody, nil)
+}
+
+// cancelStages cancels paths in batches. ScoutAM stops a batch at its first bad file, so a failed
+// batch is retried one file at a time.
+func (c *apiClient) cancelStages(ctx context.Context, token string, paths []string, fsid string, batchSize int) (failed int, firstErr error) {
+	for start := 0; start < len(paths); start += batchSize {
+		batch := paths[start:min(start+batchSize, len(paths))]
+		err := c.cancelStage(ctx, token, batch, fsid)
+		if err == nil {
+			continue
+		}
+		if len(batch) == 1 {
+			failed++
+			firstErr = cmp.Or(firstErr, err)
+			continue
+		}
+		for _, path := range batch {
+			if err := c.cancelStage(ctx, token, []string{path}, fsid); err != nil {
+				failed++
+				firstErr = cmp.Or(firstErr, err)
+			}
+		}
+	}
+	return failed, firstErr
 }
 
 func (c *apiClient) do(ctx context.Context, method string, path string, token string, reqBody any, respBody any) error {

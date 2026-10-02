@@ -45,6 +45,9 @@ type ViperScoutAMPluginConfig struct {
 	BatchSize int `mapstructure:"batch-size" yaml:"batch-size"`
 	// RsyncPath is the rsync binary used by Transfer to copy files as soon as they're staged
 	RsyncPath string `mapstructure:"rsync-path" yaml:"rsync-path"`
+	// CancelStageOnTimeout cancels still-pending stage requests when stage-timeout fires. Requires an
+	// operator (or higher) ScoutAM account, and also cancels other requesters' stages of the same files.
+	CancelStageOnTimeout bool `mapstructure:"cancel-stage-on-timeout" yaml:"cancel-stage-on-timeout"`
 }
 
 type ScoutAMPlugin struct {

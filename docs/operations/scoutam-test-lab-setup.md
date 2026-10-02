@@ -376,6 +376,7 @@ plugins:
     stage-timeout: 30m
     batch-size: 3 # small on purpose so a test directory spans several stage requests/rsync runs
     rsync-path: rsync
+    cancel-stage-on-timeout: false # see "Cancel stages on timeout" below
 ```
 
 This runs the `scoutam` plugin in **pipeline mode**: during the transfer stage it requests staging
@@ -389,6 +390,15 @@ staged. Three settings make this work:
 
 In this mode `stage-timeout` is how long to go without any stage notification while files are
 still pending, not a limit on the whole transfer.
+
+Set `cancel-stage-on-timeout: true` to have the plugin cancel its still-pending stage requests in
+ScoutAM when `stage-timeout` fires (in either mode). It's off by default because:
+
+- It needs an operator (or higher) ScoutAM account. The lab's `admin` account qualifies.
+- Cancels are per file, so another requester's stage of the same file is cancelled too.
+- A file whose stage job is already running still comes online.
+
+See [Cancelling stages on timeout](scoutam-plugin-testing.md#cancelling-stages-on-timeout).
 
 To stage everything before copying instead (the original mode), set `setup-src: scoutam` and
 `transfer-src: [rsync]` on `archive` and drop `scoutam` from `default`'s `transfer-dst`. See
@@ -457,6 +467,28 @@ others are still staging. In the validation run (8 x 5MB offline files), the fir
 ~18s after submission and the transfer was `Finalized` ~7s later. Checksums matched
 `/tmp/pipeline.md5`, and the symlink, empty directory, permissions, ownership and mtimes matched
 the source.
+
+### Cancel stages on timeout
+
+ScoutAM on this lab waits about 15s after a stage request before starting the stage job, so a
+short timeout fires while the files are still queued. On `conduit-fta`, back up the config and set:
+
+```yaml
+    stage-timeout: 5s
+    cancel-stage-on-timeout: true
+```
+
+Release the test files again (`sudo samcli file release <file>` on `conduit-scoutam`), then run the
+same `conduit cp -r` as above. Expect:
+
+- The transfer ends in `Error` / `FtaPluginFailed` within a few seconds, with `cancelled 8 pending
+  stage request(s)` in the error message and in the `conduit-fta` stderr in the `conduit-runner`
+  journal.
+- `sudo samcli scheduler` on `conduit-scoutam` shows empty queues, and
+  `sudo scoutfs stat -s offline_blocks <file>` is still non-zero for every file.
+
+With `cancel-stage-on-timeout: false`, the same run still times out, but ScoutAM stages the files
+anyway about 15s later. Restore the config backup afterwards.
 
 ## Troubleshooting notes
 

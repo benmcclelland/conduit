@@ -71,6 +71,10 @@ plugins:
     batch-size: 1000
     # rsync binary used when scoutam is the transfer plugin (stages and copies each file as soon as it's online)
     rsync-path: rsync
+    # cancel still-pending stage requests (PUT /v1/scheduler/stagecancelfiles) when stage-timeout fires.
+    # Needs an operator (or higher) ScoutAM account. Cancels are per file, so other requesters' stages of
+    # the same files are cancelled too. Files whose stage job is already running still come online.
+    cancel-stage-on-timeout: false
   marchive:
     # The MarFS object list generation command
     objlist-path: mustang

@@ -18,6 +18,35 @@ type copyItem struct {
 	isDir bool
 }
 
+type pendingStage struct {
+	item    copyItem
+	apiPath string
+	fsid    string
+}
+
+// mountRelative returns apiPath relative to mount, which is how ScoutAM names files in stage notifications.
+func mountRelative(mount string, apiPath string) (string, error) {
+	key, err := filepath.Rel(mount, apiPath)
+	if err != nil || !pathIsWithin(mount, apiPath) {
+		return "", fmt.Errorf("path %q is outside ScoutFS mount %q", apiPath, mount)
+	}
+	return key, nil
+}
+
+// stageEventKey maps a notification filename to its mount-relative key; absolute names are accepted too.
+func stageEventKey(filename string, mounts []string) string {
+	name := filepath.Clean(filename)
+	if !filepath.IsAbs(name) {
+		return name
+	}
+	for _, mount := range mounts {
+		if key, err := mountRelative(mount, name); err == nil {
+			return key
+		}
+	}
+	return name
+}
+
 // stagePipeline tracks files from the moment they're requested for staging until they're ready to
 // copy. The directory walker adds items, the NATS callback moves them from pending to ready, and
 // the copier drains ready items. Directory entries are held back until every file has been copied
@@ -25,7 +54,7 @@ type copyItem struct {
 type stagePipeline struct {
 	mu        sync.Mutex
 	notify    chan struct{}
-	pending   map[string]copyItem // keyed by path relative to its ScoutFS mount, as ScoutAM reports it
+	pending   map[string]pendingStage // keyed by path relative to its ScoutFS mount, as ScoutAM reports it
 	mounts    []string
 	ready     []copyItem
 	dirs      []copyItem
@@ -41,7 +70,7 @@ type stagePipeline struct {
 func newStagePipeline() *stagePipeline {
 	return &stagePipeline{
 		notify:       make(chan struct{}, 1),
-		pending:      make(map[string]copyItem),
+		pending:      make(map[string]pendingStage),
 		lastProgress: time.Now(),
 	}
 }
@@ -55,10 +84,10 @@ func (sp *stagePipeline) wake() {
 
 // addPending must be called before the stage request for apiPath is submitted so a fast
 // notification always finds its item. mount is the ScoutFS mount apiPath lives under.
-func (sp *stagePipeline) addPending(mount string, apiPath string, item copyItem) error {
-	key, err := filepath.Rel(mount, apiPath)
-	if err != nil || !pathIsWithin(mount, apiPath) {
-		return fmt.Errorf("path %q is outside ScoutFS mount %q", apiPath, mount)
+func (sp *stagePipeline) addPending(mount string, fsid string, apiPath string, item copyItem) error {
+	key, err := mountRelative(mount, apiPath)
+	if err != nil {
+		return err
 	}
 
 	sp.mu.Lock()
@@ -69,26 +98,20 @@ func (sp *stagePipeline) addPending(mount string, apiPath string, item copyItem)
 	if len(sp.pending) == 0 {
 		sp.lastProgress = time.Now()
 	}
-	sp.pending[key] = item
+	sp.pending[key] = pendingStage{item: item, apiPath: apiPath, fsid: fsid}
 	sp.requested++
 	return nil
 }
 
-// eventKey maps a notification filename to its pending key. ScoutAM reports paths relative to
-// the filesystem mount; absolute paths are accepted too. Must be called with sp.mu held.
-func (sp *stagePipeline) eventKey(filename string) string {
-	name := filepath.Clean(filename)
-	if !filepath.IsAbs(name) {
-		return name
+// pendingStages returns the server-side paths still waiting to stage, grouped by fsid.
+func (sp *stagePipeline) pendingStages() map[string][]string {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	byFSID := make(map[string][]string)
+	for _, ps := range sp.pending {
+		byFSID[ps.fsid] = append(byFSID[ps.fsid], ps.apiPath)
 	}
-	for _, mount := range sp.mounts {
-		if pathIsWithin(mount, name) {
-			if rel, err := filepath.Rel(mount, name); err == nil {
-				return rel
-			}
-		}
-	}
-	return name
+	return byFSID
 }
 
 // addReady queues an item that doesn't need staging (directories, symlinks, non-ScoutFS sources).
@@ -106,8 +129,8 @@ func (sp *stagePipeline) addReady(item copyItem) {
 // onStageEvent returns false if evt isn't for a file we're waiting on.
 func (sp *stagePipeline) onStageEvent(evt stageEvent) bool {
 	sp.mu.Lock()
-	key := sp.eventKey(evt.Filename)
-	item, ok := sp.pending[key]
+	key := stageEventKey(evt.Filename, sp.mounts)
+	ps, ok := sp.pending[key]
 	if !ok {
 		sp.mu.Unlock()
 		return false
@@ -118,7 +141,7 @@ func (sp *stagePipeline) onStageEvent(evt stageEvent) bool {
 	if evt.Error != "" {
 		sp.stageErrs = append(sp.stageErrs, fmt.Sprintf("%s: %s", evt.Filename, evt.Error))
 	} else {
-		sp.ready = append(sp.ready, item)
+		sp.ready = append(sp.ready, ps.item)
 	}
 	sp.mu.Unlock()
 	sp.wake()
