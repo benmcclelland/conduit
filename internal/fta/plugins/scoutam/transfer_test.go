@@ -105,6 +105,29 @@ func TestStagePipelineWaitsForWalk(t *testing.T) {
 	expectBatch(t, pl, "a")
 }
 
+func TestStagePipelineCapsReadyBatch(t *testing.T) {
+	pl := newStagePipeline()
+	pl.addReady(copyItem{rel: "one"})
+	pl.addReady(copyItem{rel: "two"})
+	pl.addReady(copyItem{rel: "three"})
+
+	batch, done, err := pl.next(2, time.Second)
+	if err != nil || done {
+		t.Fatalf("next() done = %v, err = %v", done, err)
+	}
+	if len(batch) != 2 {
+		t.Fatalf("next() returned %d items, want 2", len(batch))
+	}
+
+	batch, done, err = pl.next(2, time.Second)
+	if err != nil || done {
+		t.Fatalf("next() done = %v, err = %v", done, err)
+	}
+	if len(batch) != 1 || batch[0].rel != "three" {
+		t.Fatalf("next() = %+v, want only three", batch)
+	}
+}
+
 func TestStagePipelineRejectsOutsideMount(t *testing.T) {
 	if err := newStagePipeline().addPending("/fs", "1", "/other/a", copyItem{}); err == nil {
 		t.Fatal("addPending() error = nil, want error")
@@ -250,6 +273,30 @@ func TestRsyncItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertExists(t, fileDst, true)
+}
+
+func TestSyncPftoolDirectory(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	dst := filepath.Join(t.TempDir(), "dst")
+	if err := os.MkdirAll(filepath.Join(src, "nested"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(src, "nested"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	g := copyGroup{srcRoot: src, destRoot: dst, isDir: true}
+	if err := syncPftoolDirectory(g, "nested"); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(filepath.Join(dst, "nested"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o750 {
+		t.Errorf("destination directory mode = %v, want 0750", info.Mode().Perm())
+	}
 }
 
 func writeFile(t *testing.T, path string) {

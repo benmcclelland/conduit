@@ -64,7 +64,7 @@ The plugin can stage in one of two places, chosen by the archive filesystem's `p
 | Mode | Config | Behavior |
 |---|---|---|
 | Stage then copy | `setup-src: scoutam`, `transfer-src/dst: [rsync]` (or pftool) | `Setup()` stages every file of every source and waits for all notifications; only then does the transfer plugin start copying. `stage-timeout` bounds the whole wait. |
-| Stage and copy in a pipeline | `setup-src: posix`, `transfer-src: [scoutam]`, and `scoutam` in the **destination** filesystem's `transfer-dst` | `Transfer()` walks the sources, submits `batchstage` requests, and copies each file with rsync as soon as its notification arrives (up to `batch-size` files per rsync run, one run at a time). `stage-timeout` is how long to go with no notification while files are still pending. |
+| Stage and copy in a pipeline | `setup-src: posix`, `transfer-src: [scoutam]`, and `scoutam` in the **destination** filesystem's `transfer-dst` | `Transfer()` walks the sources, submits `batchstage` requests, and sends ready files to the configured `rsync` or `pftool` backend as notifications arrive (up to `batch-size` files per run). `stage-timeout` is how long to go with no notification while files are still pending. |
 
 In pipeline mode:
 
@@ -76,7 +76,8 @@ In pipeline mode:
 - Destination layout follows posix validation: if the destination is an existing directory, each
   source lands inside it as `<dest>/<basename>`; otherwise the destination becomes the copy.
 - rsync runs with `--links --perms --times --group --owner --specials`, the same options the rsync
-  plugin uses. Directory sources are copied with `--files-from`.
+  plugin uses. Directory sources are copied with `--files-from`. With `copy-plugin: pftool`, ready
+  files are grouped by destination directory and copied by `pfcp` as their stage notifications arrive.
 - A stage error or a failed rsync batch doesn't stop the other files; all failures are reported
   together at the end, and the transfer fails.
 
@@ -148,7 +149,7 @@ See the `scoutam` section of
 [docs/configs/conduit-fta-full-reference-config.yaml](../configs/conduit-fta-full-reference-config.yaml)
 for the full set of `plugins.scoutam` options (`api-base-url`, `api-username`, `api-password`,
 `api-insecure-skip-verify`, `nats-servers`, `nats-stage-topic-prefix`, `stage-timeout`,
-`batch-size`, `rsync-path`, `cancel-stage-on-timeout`).
+`batch-size`, `copy-plugin`, `rsync-path`, `cancel-stage-on-timeout`).
 
 ## Cancelling stages on timeout
 

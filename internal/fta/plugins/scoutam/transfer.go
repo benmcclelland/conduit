@@ -21,6 +21,7 @@ import (
 
 	proto "github.com/lanl/conduit/api"
 	"github.com/lanl/conduit/internal/fta/plugin"
+	"github.com/lanl/conduit/internal/fta/plugins/pftool"
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
@@ -62,17 +63,29 @@ func (s *stager) filesystem(ctx context.Context, apiRoot string) (filesystemInfo
 }
 
 // Transfer stages and copies in a pipeline: while sources are walked, files are requested for
-// staging in batches, and each file is copied with rsync as soon as ScoutAM reports it staged
-// instead of waiting for the whole source to come online. Use with setup-src: posix so Setup
-// doesn't stage everything up front.
+// staging in batches, and each ready batch is copied with the configured backend instead of
+// waiting for the whole source to come online. Use with setup-src: posix so Setup doesn't stage
+// everything up front.
 func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.PluginData, destInfo proto.DestInfo, action string, options map[string]*anypb.Any, updateTransferProgress plugin.UpdateTransferProgress, updateAction plugin.UpdateAction) *proto.FTAPluginErrors {
 	cfg := DefaultScoutAMPluginConfig()
 	if err := plugin.GetPluginConfigsFromViper(ScoutAMPluginKey, &cfg); err != nil {
 		return transferError(proto.Error_ERROR_INVALID_CONDUIT_CONFIG, fmt.Sprintf("failed to get scoutam config: %v", err))
 	}
+	copyPlugin := cfg.CopyPlugin
+	if copyPlugin == "" {
+		copyPlugin = DefaultScoutAMCopyPlugin
+	}
+	if copyPlugin != "rsync" && copyPlugin != pftool.PftoolPluginKey {
+		return transferError(proto.Error_ERROR_INVALID_CONDUIT_CONFIG, fmt.Sprintf("unsupported scoutam copy-plugin %q", copyPlugin))
+	}
+
 	batchSize := cfg.BatchSize
 	if batchSize <= 0 {
 		batchSize = DefaultScoutAMBatchSize
+	}
+	copyBatchMaxSize := cfg.CopyBatchMaxSize
+	if copyBatchMaxSize <= 0 {
+		copyBatchMaxSize = DefaultScoutAMCopyBatchMaxSize
 	}
 
 	groups, pathErr := buildCopyGroups(pluginData, destInfo)
@@ -123,10 +136,11 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 	}()
 
 	var copyErrs []string
+	pftoolErrs := &proto.FTAPluginErrors{}
 	var files uint32
 	var copiedBytes int64
 	for {
-		batch, done, err := pl.next(batchSize, cfg.StageTimeout)
+		batch, done, err := pl.next(copyBatchMaxSize, cfg.StageTimeout)
 		if err != nil {
 			msg := err.Error()
 			if cfg.CancelStageOnTimeout && st != nil {
@@ -145,6 +159,12 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 		}
 		for _, gi := range slices.Sorted(maps.Keys(byGroup)) {
 			items := byGroup[gi]
+			if copyPlugin == pftool.PftoolPluginKey {
+				errs := p.copyWithPftool(transferID, groups[gi], items, action, options, updateTransferProgress, updateAction)
+				pftoolErrs.Errors = append(pftoolErrs.Errors, errs.Errors...)
+				continue
+			}
+
 			if err := rsyncItems(ctx, cfg.RsyncPath, groups[gi], items); err != nil {
 				copyErrs = append(copyErrs, fmt.Sprintf("%s: %v", groups[gi].userPath, err))
 				continue
@@ -172,12 +192,25 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 		return transferError(proto.Error_ERROR_FTA_PLUGIN_FAILED, fmt.Sprintf("failed to request staging: %v", walkErr))
 	}
 
-	for _, g := range groups {
-		if !g.isDir {
-			continue
-		}
-		if err := syncRootDir(ctx, cfg.RsyncPath, g); err != nil {
-			copyErrs = append(copyErrs, fmt.Sprintf("%s: %v", g.userPath, err))
+	if len(stageErrs) == 0 {
+		if copyPlugin == "rsync" {
+			for _, g := range groups {
+				if !g.isDir {
+					continue
+				}
+				if err := syncRootDir(ctx, cfg.RsyncPath, g); err != nil {
+					copyErrs = append(copyErrs, fmt.Sprintf("%s: %v", g.userPath, err))
+				}
+			}
+		} else {
+			for _, g := range groups {
+				if !g.isDir {
+					continue
+				}
+				if err := syncPftoolDirectory(g, ""); err != nil {
+					copyErrs = append(copyErrs, fmt.Sprintf("%s: %v", g.userPath, err))
+				}
+			}
 		}
 	}
 
@@ -194,7 +227,71 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 			ErrMessage: "failed to copy staged files: " + summarizeErrors(copyErrs),
 		})
 	}
+	pluginErrs.Errors = append(pluginErrs.Errors, pftoolErrs.Errors...)
 	return pluginErrs
+}
+
+func (p *ScoutAMPlugin) copyWithPftool(transferID uuid.UUID, g copyGroup, items []copyItem, action string, options map[string]*anypb.Any, updateTransferProgress plugin.UpdateTransferProgress, updateAction plugin.UpdateAction) *proto.FTAPluginErrors {
+	errs := &proto.FTAPluginErrors{}
+	byDestination := make(map[string]map[string]*plugin.PluginPathInfo)
+
+	for _, item := range items {
+		if item.isDir {
+			if err := syncPftoolDirectory(g, item.rel); err != nil {
+				errs.Errors = append(errs.Errors, &proto.FTAPathError{PErr: proto.Error_ERROR_PFTOOL_FAILED, ErrMessage: err.Error()})
+			}
+			continue
+		}
+
+		sourcePath := g.srcRoot
+		destinationPath := g.destRoot
+		if g.isDir {
+			sourcePath = filepath.Join(sourcePath, item.rel)
+			destinationPath = filepath.Join(destinationPath, item.rel)
+		}
+		destinationDir := filepath.Dir(destinationPath)
+		if err := os.MkdirAll(destinationDir, 0o755); err != nil {
+			errs.Errors = append(errs.Errors, &proto.FTAPathError{PErr: proto.Error_ERROR_PFTOOL_FAILED, ErrMessage: fmt.Sprintf("failed to create pftool destination directory %s: %v", destinationDir, err)})
+			continue
+		}
+		if byDestination[destinationDir] == nil {
+			byDestination[destinationDir] = make(map[string]*plugin.PluginPathInfo)
+		}
+		byDestination[destinationDir][sourcePath] = &plugin.PluginPathInfo{TransferPath: sourcePath}
+	}
+
+	for _, destinationDir := range slices.Sorted(maps.Keys(byDestination)) {
+		pftoolPlugin := &pftool.PftoolPlugin{}
+		pftoolPlugin.Initialize(transferID, p.log)
+		batchData := &plugin.PluginData{
+			SourcePluginInfo:      byDestination[destinationDir],
+			DestinationPluginInfo: &plugin.PluginPathInfo{TransferPath: destinationDir},
+		}
+		batchErrs := pftoolPlugin.Transfer(transferID, batchData, proto.DestInfo_DEST_IS_DIR, action, options, updateTransferProgress, updateAction)
+		errs.Errors = append(errs.Errors, batchErrs.Errors...)
+	}
+
+	return errs
+}
+
+func syncPftoolDirectory(g copyGroup, rel string) error {
+	sourcePath := g.srcRoot
+	destinationPath := g.destRoot
+	if rel != "" {
+		sourcePath = filepath.Join(sourcePath, rel)
+		destinationPath = filepath.Join(destinationPath, rel)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to stat source directory %s: %w", sourcePath, err)
+	}
+	if err := os.MkdirAll(destinationPath, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("failed to create destination directory %s: %w", destinationPath, err)
+	}
+	if err := os.Chmod(destinationPath, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("failed to set destination directory permissions %s: %w", destinationPath, err)
+	}
+	return os.Chtimes(destinationPath, info.ModTime(), info.ModTime())
 }
 
 func buildCopyGroups(pluginData *plugin.PluginData, destInfo proto.DestInfo) ([]copyGroup, *proto.FTAPathError) {

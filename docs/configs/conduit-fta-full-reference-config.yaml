@@ -69,6 +69,10 @@ plugins:
     stage-timeout: 30m
     # max number of files per batchstage API request (and per rsync invocation in transfer mode); directories are split into multiple requests of this size
     batch-size: 1000
+    # max ready files sent to one copy invocation; ready files are copied immediately without waiting for this cap
+    copy-batch-max-size: 1000
+    # copy backend after staging: rsync or pftool streams each staged batch as files come online
+    copy-plugin: rsync
     # rsync binary used when scoutam is the transfer plugin (stages and copies each file as soon as it's online)
     rsync-path: rsync
     # cancel still-pending stage requests (PUT /v1/scheduler/stagecancelfiles) when stage-timeout fires.

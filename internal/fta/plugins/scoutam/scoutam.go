@@ -19,7 +19,9 @@ const (
 	DefaultScoutAMNatsStageTopicPre = "conduit.stage"
 	DefaultScoutAMStageTimeout      = 30 * time.Minute
 	DefaultScoutAMBatchSize         = 1000
+	DefaultScoutAMCopyBatchMaxSize  = 1000
 	DefaultScoutAMRsyncPath         = "rsync"
+	DefaultScoutAMCopyPlugin        = "rsync"
 )
 
 var _ plugin.ConduitFTAPlugin = (*ScoutAMPlugin)(nil)
@@ -43,8 +45,13 @@ type ViperScoutAMPluginConfig struct {
 	// split into multiple requests of this size so ScoutAM can start staging early files while later
 	// ones are still being enumerated, and so no single request body gets too large.
 	BatchSize int `mapstructure:"batch-size" yaml:"batch-size"`
+	// CopyBatchMaxSize caps the number of ready files sent to one copy invocation. Ready files are
+	// copied immediately; this does not wait for a batch to fill.
+	CopyBatchMaxSize int `mapstructure:"copy-batch-max-size" yaml:"copy-batch-max-size"`
 	// RsyncPath is the rsync binary used by Transfer to copy files as soon as they're staged
 	RsyncPath string `mapstructure:"rsync-path" yaml:"rsync-path"`
+	// CopyPlugin selects the copy backend used after ScoutAM stages source files. Supported values are rsync and pftool.
+	CopyPlugin string `mapstructure:"copy-plugin" yaml:"copy-plugin"`
 	// CancelStageOnTimeout cancels still-pending stage requests when stage-timeout fires. Requires an
 	// operator (or higher) ScoutAM account, and also cancels other requesters' stages of the same files.
 	CancelStageOnTimeout bool `mapstructure:"cancel-stage-on-timeout" yaml:"cancel-stage-on-timeout"`
@@ -95,6 +102,8 @@ func DefaultScoutAMPluginConfig() ViperScoutAMPluginConfig {
 		NatsStageTopicPrefix: DefaultScoutAMNatsStageTopicPre,
 		StageTimeout:         DefaultScoutAMStageTimeout,
 		BatchSize:            DefaultScoutAMBatchSize,
+		CopyBatchMaxSize:     DefaultScoutAMCopyBatchMaxSize,
 		RsyncPath:            DefaultScoutAMRsyncPath,
+		CopyPlugin:           DefaultScoutAMCopyPlugin,
 	}
 }
