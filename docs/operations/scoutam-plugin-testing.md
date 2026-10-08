@@ -149,7 +149,8 @@ See the `scoutam` section of
 [docs/configs/conduit-fta-full-reference-config.yaml](../configs/conduit-fta-full-reference-config.yaml)
 for the full set of `plugins.scoutam` options (`api-base-url`, `api-username`, `api-password`,
 `api-insecure-skip-verify`, `nats-servers`, `nats-stage-topic-prefix`, `stage-timeout`,
-`batch-size`, `copy-plugin`, `rsync-path`, `cancel-stage-on-timeout`).
+`batch-size`, `copy-batch-max-size`, `copy-workers`, `copy-plugin`, `rsync-path`,
+`cancel-stage-on-timeout`).
 
 ## Cancelling stages on timeout
 

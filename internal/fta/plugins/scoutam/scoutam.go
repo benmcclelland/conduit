@@ -20,6 +20,7 @@ const (
 	DefaultScoutAMStageTimeout      = 30 * time.Minute
 	DefaultScoutAMBatchSize         = 1000
 	DefaultScoutAMCopyBatchMaxSize  = 1000
+	DefaultScoutAMCopyWorkers       = 1
 	DefaultScoutAMRsyncPath         = "rsync"
 	DefaultScoutAMCopyPlugin        = "rsync"
 )
@@ -48,6 +49,8 @@ type ViperScoutAMPluginConfig struct {
 	// CopyBatchMaxSize caps the number of ready files sent to one copy invocation. Ready files are
 	// copied immediately; this does not wait for a batch to fill.
 	CopyBatchMaxSize int `mapstructure:"copy-batch-max-size" yaml:"copy-batch-max-size"`
+	// CopyWorkers is the number of concurrent rsync copy invocations in pipeline mode.
+	CopyWorkers int `mapstructure:"copy-workers" yaml:"copy-workers"`
 	// RsyncPath is the rsync binary used by Transfer to copy files as soon as they're staged
 	RsyncPath string `mapstructure:"rsync-path" yaml:"rsync-path"`
 	// CopyPlugin selects the copy backend used after ScoutAM stages source files. Supported values are rsync and pftool.
@@ -103,6 +106,7 @@ func DefaultScoutAMPluginConfig() ViperScoutAMPluginConfig {
 		StageTimeout:         DefaultScoutAMStageTimeout,
 		BatchSize:            DefaultScoutAMBatchSize,
 		CopyBatchMaxSize:     DefaultScoutAMCopyBatchMaxSize,
+		CopyWorkers:          DefaultScoutAMCopyWorkers,
 		RsyncPath:            DefaultScoutAMRsyncPath,
 		CopyPlugin:           DefaultScoutAMCopyPlugin,
 	}

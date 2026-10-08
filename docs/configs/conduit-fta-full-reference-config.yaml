@@ -71,6 +71,8 @@ plugins:
     batch-size: 1000
     # max ready files sent to one copy invocation; ready files are copied immediately without waiting for this cap
     copy-batch-max-size: 1000
+    # concurrent rsync copy invocations; only used when copy-plugin is rsync
+    copy-workers: 1
     # copy backend after staging: rsync or pftool streams each staged batch as files come online
     copy-plugin: rsync
     # rsync binary used when scoutam is the transfer plugin (stages and copies each file as soon as it's online)

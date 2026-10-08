@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -87,6 +88,10 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 	if copyBatchMaxSize <= 0 {
 		copyBatchMaxSize = DefaultScoutAMCopyBatchMaxSize
 	}
+	copyWorkers := cfg.CopyWorkers
+	if copyWorkers <= 0 {
+		copyWorkers = DefaultScoutAMCopyWorkers
+	}
 
 	groups, pathErr := buildCopyGroups(pluginData, destInfo)
 	if pathErr != nil {
@@ -139,6 +144,52 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 	pftoolErrs := &proto.FTAPluginErrors{}
 	var files uint32
 	var copiedBytes int64
+	deferredDirectories := make(map[int][]copyItem)
+	var copyMu sync.Mutex
+	var copyTasks chan map[int][]copyItem
+	var copyWG sync.WaitGroup
+	if copyPlugin == "rsync" {
+		copyTasks = make(chan map[int][]copyItem, copyWorkers)
+		for range copyWorkers {
+			copyWG.Add(1)
+			go func() {
+				defer copyWG.Done()
+				for byGroup := range copyTasks {
+					var taskErrs []string
+					var taskFiles uint32
+					var taskBytes int64
+					for _, gi := range slices.Sorted(maps.Keys(byGroup)) {
+						items := byGroup[gi]
+						if err := rsyncItems(ctx, cfg.RsyncPath, groups[gi], items); err != nil {
+							taskErrs = append(taskErrs, fmt.Sprintf("%s: %v", groups[gi].userPath, err))
+							continue
+						}
+						for _, item := range items {
+							if !item.isDir {
+								taskFiles++
+								taskBytes += item.size
+							}
+						}
+					}
+					copyMu.Lock()
+					copyErrs = append(copyErrs, taskErrs...)
+					files += taskFiles
+					copiedBytes += taskBytes
+					copyMu.Unlock()
+				}
+			}()
+		}
+	}
+	var finishCopyWorkers sync.Once
+	waitForCopyWorkers := func() {
+		finishCopyWorkers.Do(func() {
+			if copyTasks != nil {
+				close(copyTasks)
+				copyWG.Wait()
+			}
+		})
+	}
+	defer waitForCopyWorkers()
 	for {
 		batch, done, err := pl.next(copyBatchMaxSize, cfg.StageTimeout)
 		if err != nil {
@@ -165,25 +216,38 @@ func (p *ScoutAMPlugin) Transfer(transferID uuid.UUID, pluginData *plugin.Plugin
 				continue
 			}
 
-			if err := rsyncItems(ctx, cfg.RsyncPath, groups[gi], items); err != nil {
-				copyErrs = append(copyErrs, fmt.Sprintf("%s: %v", groups[gi].userPath, err))
-				continue
-			}
+			fileItems := make([]copyItem, 0, len(items))
 			for _, item := range items {
-				if !item.isDir {
-					files++
-					copiedBytes += item.size
+				if item.isDir {
+					deferredDirectories[gi] = append(deferredDirectories[gi], item)
+					continue
 				}
+				fileItems = append(fileItems, item)
+			}
+			if len(fileItems) > 0 {
+				copyTasks <- map[int][]copyItem{gi: fileItems}
 			}
 		}
 
+		copyMu.Lock()
+		copiedFiles := files
+		copiedData := copiedBytes
+		copyMu.Unlock()
 		requested, staged, _, _ := pl.status()
 		if uErr := updateTransferProgress(&proto.ETCDStatusDetails{
-			Files:        files,
-			Data:         fmt.Sprintf("%dB", copiedBytes),
-			PluginStatus: fmt.Sprintf("staged %d of %d requested file(s), copied %d file(s)", staged, requested, files),
+			Files:        copiedFiles,
+			Data:         fmt.Sprintf("%dB", copiedData),
+			PluginStatus: fmt.Sprintf("staged %d of %d requested file(s), copied %d file(s)", staged, requested, copiedFiles),
 		}); uErr != nil {
 			p.log.Errorf("failed to update scoutam transfer progress: %v", uErr)
+		}
+	}
+	waitForCopyWorkers()
+	if copyPlugin == "rsync" {
+		for _, gi := range slices.Sorted(maps.Keys(deferredDirectories)) {
+			if err := rsyncItems(ctx, cfg.RsyncPath, groups[gi], deferredDirectories[gi]); err != nil {
+				copyErrs = append(copyErrs, fmt.Sprintf("%s: %v", groups[gi].userPath, err))
+			}
 		}
 	}
 
